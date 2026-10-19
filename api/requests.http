@@ -1,0 +1,26 @@
+### Salud de la API + conexión a MySQL
+GET http://127.0.0.1:8000/api/health
+
+### Catálogo de especies
+GET http://127.0.0.1:8000/api/especies
+
+### Historial de simulaciones
+GET http://127.0.0.1:8000/api/simulaciones?limit=20
+
+### Reportes agregados
+GET http://127.0.0.1:8000/api/reportes
+
+### Mediciones de la simulación precargada 1
+GET http://127.0.0.1:8000/api/simulaciones/1/mediciones
+
+### Detalle de simulación precargada 1
+GET http://127.0.0.1:8000/api/simulaciones/1
+
+### Comparar dos simulaciones precargadas
+POST http://127.0.0.1:8000/api/comparar
+Content-Type: application/json
+
+{
+  "simulacion_a": 1,
+  "simulacion_b": 2
+}

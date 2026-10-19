@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Laboratorio bioinformático de cultivo: simulación de crecimiento vegetal, estrés ambiental, escenarios A/B y persistencia MySQL.">
+  <title>Práctica 05 | Laboratorio bioinformático de cultivo</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <div class="app-frame">
+    <header class="topbar">
+      <a class="brand" href="#dashboard" aria-label="Laboratorio bioinformático de cultivo">
+        <span class="brand-mark">⌁</span>
+        <span><strong>PHYTO<span>LAB</span></strong><small>LABORATORIO BIOINFORMÁTICO</small></span>
+      </a>
+      <div class="topbar-title"><span class="eyebrow">PRÁCTICA 05</span><h1>Modelado y análisis de crecimiento vegetal</h1></div>
+      <div class="topbar-right">
+        <span class="status-chip" id="apiStatus"><i></i><span>Comprobando API...</span></span>
+        <span class="avatar">BIO</span>
+      </div>
+    </header>
+
+    <nav class="main-nav" aria-label="Navegación principal">
+      <button class="nav-item active" data-view="dashboard"><span>◫</span> Simulador</button>
+      <button class="nav-item" data-view="history"><span>◷</span> Historial <span class="nav-count" id="historyCount">0</span></button>
+      <button class="nav-item" data-view="reports"><span>▥</span> Reportes</button>
+      <div class="nav-spacer"></div>
+      <span class="project-label">practica-05-bioinformatica</span>
+    </nav>
+
+    <main>
+      <section class="view-panel active" id="view-dashboard">
+        <div class="page-heading">
+          <div><div class="eyebrow green">SIMULACIÓN ECOLÓGICA · DATOS + MODELOS</div><h2>Laboratorio de cultivo</h2><p>Configura el ambiente, ejecuta el modelo y compara estrategias agronómicas.</p></div>
+          <div class="run-meta"><span class="live-dot"></span><span id="runStatus">Simulación lista</span><span class="meta-divider"></span><span id="currentModelBadge">Modelo logístico</span></div>
+        </div>
+
+        <div class="workspace-grid">
+          <aside class="control-card card">
+            <div class="card-heading"><div><span class="section-kicker">01 / CONFIGURACIÓN</span><h3>Parámetros del cultivo</h3></div><span class="round-icon">⚙</span></div>
+            <label class="field-label" for="speciesSelect">Especie del catálogo</label>
+            <select id="speciesSelect" class="form-control"><option>Cargando especies...</option></select>
+            <div class="species-note" id="speciesNote">Catálogo biológico</div>
+            <label class="field-label" for="modelSelect">Modelo matemático · Escenario A</label>
+            <select id="modelSelect" class="form-control">
+              <option value="logistico">Logístico (Verhulst)</option><option value="gompertz">Gompertz</option><option value="exponencial">Exponencial</option><option value="lineal">Lineal</option>
+            </select>
+            <div class="section-separator"></div>
+            <div class="section-subhead"><strong>Variables ambientales · A</strong><span>Editar valores</span></div>
+            <div class="range-field"><div><label for="lightRange">Luz disponible</label><output id="lightValue">78%</output></div><input type="range" id="lightRange" min="0" max="100" value="78"></div>
+            <div class="range-field"><div><label for="waterRange">Agua / humedad</label><output id="waterValue">72%</output></div><input type="range" id="waterRange" min="0" max="100" value="72"></div>
+            <div class="range-field"><div><label for="temperatureRange">Temperatura</label><output id="temperatureValue">24 °C</output></div><input type="range" id="temperatureRange" min="5" max="42" value="24"></div>
+            <div class="range-field"><div><label for="nutrientRange">Nutrientes</label><output id="nutrientValue">68%</output></div><input type="range" id="nutrientRange" min="0" max="100" value="68"></div>
+            <div class="range-field"><div><label for="co2Range">CO₂ ambiental</label><output id="co2Value">430 ppm</output></div><input type="range" id="co2Range" min="250" max="1000" step="10" value="430"></div>
+            <div class="range-field"><div><label for="windRange">Intensidad del viento</label><output id="windValue">35%</output></div><input type="range" id="windRange" min="0" max="100" value="35"></div>
+            <div class="section-separator"></div>
+            <div class="section-subhead"><strong>Parámetros genéticos</strong><span>Modelo</span></div>
+            <div class="range-field"><div><label for="rateRange">Tasa de crecimiento (r)</label><output id="rateValue">0.10</output></div><input type="range" id="rateRange" min="0.02" max="0.20" step="0.01" value="0.10"></div>
+            <div class="range-field"><div><label for="capacityRange">Capacidad de carga (K)</label><output id="capacityValue">1000</output></div><input type="range" id="capacityRange" min="300" max="2000" step="50" value="1000"></div>
+            <div class="range-field"><div><label for="daysRange">Horizonte de simulación</label><output id="daysValue">90 días</output></div><input type="range" id="daysRange" min="30" max="180" step="10" value="90"></div>
+            <div class="range-field"><div><label for="playbackRange">Velocidad visual</label><output id="playbackValue">4 días/s</output></div><input type="range" id="playbackRange" min="1" max="12" value="4"></div>
+            <div class="section-separator"></div>
+            <div class="section-subhead"><strong>Escenario B · comparación A/B</strong><span>Alternativa</span></div>
+            <label class="field-label" for="modelBSelect">Modelo matemático · Escenario B</label>
+            <select id="modelBSelect" class="form-control"><option value="gompertz">Gompertz</option><option value="logistico">Logístico (Verhulst)</option><option value="exponencial">Exponencial</option><option value="lineal">Lineal</option></select>
+            <div class="range-field"><div><label for="waterBRange">Agua en B</label><output id="waterBValue">88%</output></div><input type="range" id="waterBRange" min="0" max="100" value="88"></div>
+            <div class="range-field"><div><label for="temperatureBRange">Temperatura en B</label><output id="temperatureBValue">23 °C</output></div><input type="range" id="temperatureBRange" min="5" max="42" value="23"></div>
+            <div class="section-separator"></div>
+            <div class="section-subhead"><strong>Registro de la corrida</strong><span>Persistencia</span></div>
+            <label class="field-label" for="simulationNameInput">Nombre de la simulación</label><input id="simulationNameInput" class="form-control" maxlength="120" value="Ensayo de crecimiento vegetal" placeholder="Ej. Riego optimizado en maíz">
+            <label class="field-label" for="simulationNotesInput">Notas del experimento</label><textarea id="simulationNotesInput" class="form-control textarea" rows="2" maxlength="1800" placeholder="Objetivo, hipótesis o condiciones observadas...">Comparación educativa de dos configuraciones ambientales y modelos de crecimiento.</textarea>
+            <div class="button-stack">
+              <button class="btn btn-primary" id="runButton"><span>▶</span> Ejecutar simulación A/B</button>
+              <button class="btn btn-secondary" id="pauseButton"><span>Ⅱ</span> Pausar reproducción</button>
+              <button class="btn btn-quiet" id="resetButton">↺ Reiniciar simulación</button>
+            </div>
+            <div class="export-row"><button class="btn btn-outline" id="saveButton">Guardar en MySQL</button><button class="btn btn-outline" id="csvButton">Exportar CSV</button></div>
+            <button class="btn btn-outline full-width" id="pdfButton">Imprimir / guardar reporte PDF</button>
+            <p class="form-footnote">Los resultados son simulados con fines educativos; no sustituyen mediciones agronómicas reales.</p>
+          </aside>
+
+          <div class="main-column">
+            <section class="scene-card card">
+              <div class="scene-header"><div><span class="section-kicker">02 / VISOR PROCEDURAL</span><h3>Desarrollo vegetal en paralelo</h3><p>Selecciona una parte de la planta para inspeccionar sus indicadores.</p></div><div class="scene-legend"><span><i class="legend-a"></i> Escenario A</span><span><i class="legend-b"></i> Escenario B</span></div></div>
+              <div class="scene-wrap" id="sceneContainer"><div class="scene-loading" id="sceneLoading">Preparando visor 3D...</div><div class="scene-overlay scene-overlay-left"><span>ESCENARIO A</span><strong id="sceneSpeciesA">Maíz</strong><small id="sceneDayA">Día 0 / 90</small></div><div class="scene-overlay scene-overlay-right"><span>ESCENARIO B</span><strong id="sceneSpeciesB">Maíz · alternativa</strong><small id="sceneDayB">Día 0 / 90</small></div><div class="scene-bottom-note"><span class="live-dot"></span> Three.js · OrbitControls · Raycasting</div></div>
+              <div class="scene-footer"><span><b>Controles:</b> arrastra para orbitar · rueda para zoom · clic para seleccionar</span><span id="sceneProgressText">Crecimiento: 0%</span><button class="camera-reset" id="resetCameraButton">↻ Reiniciar cámara</button></div>
+            </section>
+
+            <section class="kpi-grid">
+              <article class="kpi-card card"><div class="kpi-label">DÍA SIMULADO <span>◷</span></div><div class="kpi-value" id="kpiDay">0 <small>/ 90</small></div><div class="kpi-foot">Avance de la corrida</div></article>
+              <article class="kpi-card card"><div class="kpi-label">ALTURA ESTIMADA <span>↟</span></div><div class="kpi-value" id="kpiHeight">0.0 <small>u</small></div><div class="kpi-foot">Escenario A · unidades</div></article>
+              <article class="kpi-card card"><div class="kpi-label">BIOMASA ESTIMADA <span>◉</span></div><div class="kpi-value" id="kpiBiomass">0 <small>g</small></div><div class="kpi-foot">Métrica del modelo</div></article>
+              <article class="kpi-card card"><div class="kpi-label">ÍNDICE CREC. RELATIVO <span>↗</span></div><div class="kpi-value" id="kpiIcr">— <small>%/día</small></div><div class="kpi-foot">Cambio frente al día anterior</div></article>
+              <article class="kpi-card card"><div class="kpi-label">HOJAS ESTIMADAS <span>❧</span></div><div class="kpi-value" id="kpiLeaves">0</div><div class="kpi-foot">Follaje proyectado</div></article>
+              <article class="kpi-card card"><div class="kpi-label">RAMAS ESTIMADAS <span>⌁</span></div><div class="kpi-value" id="kpiBranches">0</div><div class="kpi-foot">Ramificación proyectada</div></article>
+              <article class="kpi-card card"><div class="kpi-label">ESTRÉS COMPUESTO <span>◇</span></div><div class="kpi-value" id="kpiStress">0 <small>/100</small></div><div class="kpi-foot">A + B ambiental</div></article>
+              <article class="kpi-card card"><div class="kpi-label">PRÓXIMA ACCIÓN <span>✦</span></div><div class="kpi-value compact" id="kpiAction">Evaluar cultivo</div><div class="kpi-foot">Motor de decisiones</div></article>
+            </section>
+
+            <section class="analytics-grid">
+              <article class="chart-card card"><div class="card-heading"><div><span class="section-kicker">03 / ANALÍTICA</span><h3>Curva de crecimiento</h3></div><span class="chart-unit">Biomasa (g)</span></div><div class="chart-container"><canvas id="growthChart" aria-label="Curvas de biomasa de los escenarios A y B"></canvas></div><div class="chart-caption"><span><i class="legend-a"></i> Escenario A</span><span><i class="legend-b"></i> Escenario B</span></div></article>
+              <article class="chart-card card"><div class="card-heading"><div><span class="section-kicker">04 / SALUD VEGETAL</span><h3>Índices de estrés</h3></div><span class="chart-unit">0–100</span></div><div class="chart-container"><canvas id="stressChart" aria-label="Comparación de estrés hídrico, térmico, lumínico y nutricional"></canvas></div><p class="chart-note">0 indica ausencia de estrés; 100 representa una desviación alta del óptimo estimado.</p></article>
+            </section>
+
+            <section class="decision-grid">
+              <article class="decision-card card"><div class="card-heading"><div><span class="section-kicker">05 / MOTOR DE DECISIONES</span><h3>Recomendaciones agronómicas</h3></div><span class="round-icon">✦</span></div><div id="decisionList" class="decision-list"><div class="decision-empty">Ejecuta una simulación para calcular recomendaciones.</div></div></article>
+              <article class="part-card card"><div class="card-heading"><div><span class="section-kicker">06 / RAYCASTING</span><h3>Parte seleccionada</h3></div><span class="round-icon">⌖</span></div><div id="partEmpty" class="part-empty"><span>⌖</span><strong>Sin selección</strong><p>Haz clic sobre una hoja, rama o tallo en el visor.</p></div><div id="partDetails" class="part-details" hidden><div class="part-title-row"><strong id="partName">Hoja lateral</strong><span id="partScenario" class="scenario-tag">Escenario A</span></div><div class="part-species" id="partSpecies">Especie</div><div class="part-metrics"><div><small>Geometría</small><strong id="partGeometry">SphereGeometry</strong></div><div><small>Crecimiento</small><strong id="partGrowth">0%</strong></div><div><small>Estrés asociado</small><strong id="partStress">0/100</strong></div><div><small>Contribución biomasa</small><strong id="partContribution">2%</strong></div></div><div class="mini-progress"><span id="partGrowthFill"></span></div><p id="partDescription">Descripción de la parte.</p></div></article>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="view-panel" id="view-history">
+        <div class="page-heading"><div><div class="eyebrow green">TRAZABILIDAD · PERSISTENCIA</div><h2>Historial de simulaciones</h2><p>Consulta corridas guardadas en MySQL o, en modo demostración, en este navegador.</p></div><button class="btn btn-secondary" id="refreshHistoryButton">↻ Actualizar historial</button></div>
+        <article class="table-card card"><div class="table-toolbar"><div><h3>Corridas registradas</h3><p>Selecciona una simulación para revisar sus resultados.</p></div><span class="table-count" id="tableCount">0 registros</span></div><div class="table-scroll"><table><thead><tr><th>Nombre</th><th>Especie</th><th>Modelo</th><th>Biomasa final</th><th>Estrés total</th><th>Fecha</th><th></th></tr></thead><tbody id="historyTableBody"><tr><td colspan="7" class="empty-cell">No hay simulaciones guardadas todavía.</td></tr></tbody></table></div></article>
+      </section>
+
+      <section class="view-panel" id="view-reports">
+        <div class="page-heading"><div><div class="eyebrow green">ANÁLISIS AGREGADO</div><h2>Reportes del cultivo</h2><p>Rankings de biomasa, eficiencia por especie y madurez estimada.</p></div><button class="btn btn-secondary" id="refreshReportsButton">↻ Actualizar reportes</button></div>
+        <section class="report-kpis" id="reportKpis"><article class="kpi-card card"><div class="kpi-label">SIMULACIONES</div><div class="kpi-value" id="reportRunCount">0</div></article><article class="kpi-card card"><div class="kpi-label">MAYOR BIOMASA</div><div class="kpi-value" id="reportTopBiomass">—</div></article><article class="kpi-card card"><div class="kpi-label">EFICIENCIA TOP</div><div class="kpi-value" id="reportTopSpecies">—</div></article><article class="kpi-card card"><div class="kpi-label">MADUREZ PROMEDIO</div><div class="kpi-value" id="reportMaturity">— <small>días</small></div></article></section>
+        <div class="reports-grid"><article class="table-card card"><div class="table-toolbar"><div><h3>Top 5 por biomasa</h3><p>Simulaciones con mayor biomasa final estimada.</p></div></div><div class="table-scroll"><table><thead><tr><th>#</th><th>Simulación</th><th>Especie</th><th>Biomasa (g)</th><th>Modelo</th></tr></thead><tbody id="topBiomassBody"><tr><td colspan="5" class="empty-cell">Generando reporte...</td></tr></tbody></table></div></article><article class="chart-card card"><div class="card-heading"><div><span class="section-kicker">EFICIENCIA</span><h3>Biomasa por especie</h3></div></div><div class="chart-container report-chart"><canvas id="efficiencyChart"></canvas></div><p class="chart-note">La eficiencia es una aproximación educativa: biomasa final por día simulado.</p></article></div>
+        <article class="decision-card card report-summary"><div class="card-heading"><div><span class="section-kicker">LECTURA DEL REPORTE</span><h3>Interpretación</h3></div></div><p id="reportInterpretation">Los reportes se calculan a partir del historial persistido. Guarda corridas para construir una base de comparación.</p></article>
+      </section>
+    </main>
+    <footer><span>PHY TOLAB · Práctica 05</span><span>Modelo educativo, no diagnóstico agronómico real</span><span id="footerDbStatus">Modo de conexión: comprobando...</span></footer>
+  </div>
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+</body>
+</html>

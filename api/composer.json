@@ -1,0 +1,17 @@
+{
+  "name": "educativo/practica05-bioinformatica-api",
+  "description": "API REST FlightPHP para el Laboratorio Bioinformático de Cultivo - Práctica 05",
+  "type": "project",
+  "require": {
+    "php": ">=8.1",
+    "ext-json": "*",
+    "ext-pdo": "*",
+    "ext-pdo_mysql": "*",
+    "ext-mbstring": "*",
+    "flightphp/core": "^3.19"
+  },
+  "config": {
+    "sort-packages": true,
+    "platform-check": true
+  }
+}
