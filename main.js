@@ -25,11 +25,56 @@ let playbackSpeed = 4;
 let selectedPartObject = null;
 let sceneObjects = null;
 let appReady = false;
+let environmentPending = false;
+let environmentEvents = {A:[],B:[]};
 
 const readNum = (id) => Number($(id).value);
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 const lerp = (a,b,t) => a + (b-a)*t;
 const smooth = (t) => { t = clamp(t,0,1); return t*t*(3-2*t); };
+
+const DAY_NAMES = ['Invierno','Primavera','Verano','Otoño'];
+function seasonInfo(day) {
+  const elapsed=Math.max(0,Math.floor(day)-1);
+  const yearDay = elapsed % 365;
+  let season, icon, css;
+  if (yearDay < 59 || yearDay >= 335) { season='Invierno'; icon='❄'; css='winter'; }
+  else if (yearDay < 152) { season='Primavera'; icon='✿'; css='spring'; }
+  else if (yearDay < 244) { season='Verano'; icon='☀'; css='summer'; }
+  else { season='Otoño'; icon='🍂'; css='autumn'; }
+  return {season, icon, css, year:Math.floor(elapsed/365)+1, dayOfYear:yearDay+1};
+}
+function formatHorizon(days) {
+  const y=days/365;
+  if (days % 365 === 0) return y === 1 ? '1 año' : `${y} años`;
+  return `${days} días (${y.toFixed(1)} años)`;
+}
+function seasonalEnvironment(config, day) {
+  const season=seasonInfo(day).season;
+  const profiles={
+    'Invierno':{temperature:-5,water:-8,light:-18,nutrients:-2},
+    'Primavera':{temperature:1,water:3,light:4,nutrients:1},
+    'Verano':{temperature:4,water:12,light:8,nutrients:-2},
+    'Otoño':{temperature:-1,water:6,light:-8,nutrients:2}
+  };
+  const p=profiles[season]; const base=config.environment;
+  return {...base, temperature:base.temperature+p.temperature, water:clamp(base.water+p.water,0,100), light:clamp(base.light+p.light,0,100), nutrients:clamp(base.nutrients+p.nutrients,0,100), season};
+}
+function isPerennialSpecies(sp) {
+  const label=`${sp?.nombre||''} ${sp?.nombre_cientifico||''}`.toLocaleLowerCase('es');
+  return /lavanda|lavandula|perenne/.test(label);
+}
+function cycleForDay(day, config) {
+  const sp=config.species; const annual=!isPerennialSpecies(sp);
+  const shouldReseed=config.reseedAnnuals !== false;
+  if (annual && shouldReseed) {
+    if(day===0)return {age:0,cycleDay:0,annual:true,reseeded:false,perennial:false};
+    const elapsed=day-1; const cycleDay=(elapsed%365)+1;
+    return {age:cycleDay,cycleDay,annual:true,reseeded:day>1 && elapsed%365===0,perennial:false};
+  }
+  return {age:day,cycleDay:day%365,annual,perennial:!annual,reseeded:false};
+}
+
 
 async function requestApi(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
@@ -106,7 +151,39 @@ function fillSpeciesSelect() {
   const select = $('speciesSelect');
   select.innerHTML = speciesCatalog.map(s => `<option value="${Number(s.id)}">${escapeHtml(s.nombre)}${s.nombre_cientifico ? ` · ${escapeHtml(s.nombre_cientifico)}` : ''}</option>`).join('');
   select.value = String(speciesCatalog[0]?.id ?? 1);
+  setSpeciesEnvironmentDefaults();
   updateSpeciesNote();
+}
+
+// Escenarios iniciales seguros y comparables: A usa los óptimos del catálogo;
+// B aplica una variación moderada (+5 puntos de agua y +2 °C), no un estrés extremo.
+// Antes, B tenía agua=88 para todas las especies; el verano sumaba +12 y la saturaba
+// a 100, activando la penalización de mortalidad incluso en una corrida predeterminada.
+function setSpeciesEnvironmentDefaults() {
+  const sp = selectedSpecies();
+  const values = {
+    lightRange: clamp(sp.luz_opt, 0, 100),
+    waterRange: clamp(sp.agua_opt, 0, 100),
+    temperatureRange: clamp(sp.temp_opt, 5, 42),
+    nutrientRange: clamp(sp.nutrientes_opt, 0, 100),
+    co2Range: clamp(sp.co2_opt, 250, 1000),
+    waterBRange: clamp(sp.agua_opt + 5, 0, 100),
+    temperatureBRange: clamp(sp.temp_opt + 2, 5, 42)
+  };
+  const outputIds = {
+    lightRange: ['lightValue', v => `${v}%`],
+    waterRange: ['waterValue', v => `${v}%`],
+    temperatureRange: ['temperatureValue', v => `${v} °C`],
+    nutrientRange: ['nutrientValue', v => `${v}%`],
+    co2Range: ['co2Value', v => `${v} ppm`],
+    waterBRange: ['waterBValue', v => `${v}%`],
+    temperatureBRange: ['temperatureBValue', v => `${v} °C`]
+  };
+  for (const [id, value] of Object.entries(values)) {
+    $(id).value = String(value);
+    const output = outputIds[id];
+    if (output) $(output[0]).textContent = output[1](value);
+  }
 }
 
 function updateSpeciesNote() {
@@ -119,6 +196,26 @@ function updateSpeciesNote() {
   $('currentModelBadge').textContent = `Modelo ${modelLabels[$('modelSelect').value]}`;
   $('sceneSpeciesA').textContent = sp.nombre;
   $('sceneSpeciesB').textContent = `${sp.nombre} · alternativa`;
+  updateOptimumHints();
+}
+
+function updateOptimumHints() {
+  const sp=selectedSpecies();
+  const hint=(id,text,current,ideal,tol)=>{
+    const el=$(id); if(!el)return;
+    const delta=Math.abs(Number(current)-Number(ideal));
+    el.textContent=`Referencia ideal: ${text} · actual ${current}${id.toLowerCase().includes('temperature')?' °C':''}`;
+    el.classList.toggle('near-optimum',delta<=tol);
+    el.classList.toggle('off-optimum',delta>tol && delta<=tol*2);
+    el.classList.toggle('far-optimum',delta>tol*2);
+  };
+  hint('lightOptimum',`${sp.luz_opt}%`,readNum('lightRange'),sp.luz_opt,15);
+  hint('waterOptimum',`${sp.agua_opt}%`,readNum('waterRange'),sp.agua_opt,15);
+  hint('temperatureOptimum',`${sp.temp_opt} °C`,readNum('temperatureRange'),sp.temp_opt,3);
+  hint('nutrientOptimum',`${sp.nutrientes_opt}%`,readNum('nutrientRange'),sp.nutrientes_opt,15);
+  hint('co2Optimum',`${sp.co2_opt} ppm`,readNum('co2Range'),sp.co2_opt,100);
+  hint('waterBOptimum',`${sp.agua_opt}%`,readNum('waterBRange'),sp.agua_opt,15);
+  hint('temperatureBOptimum',`${sp.temp_opt} °C`,readNum('temperatureBRange'),sp.temp_opt,3);
 }
 
 function selectedSpecies() {
@@ -137,6 +234,7 @@ function gatherConfig(which = 'A') {
     rate: readNum('rateRange'),
     K: readNum('capacityRange'),
     playbackSpeed: readNum('playbackRange'),
+    reseedAnnuals: $('reseedAnnuals')?.checked !== false,
     environment: {
       light: readNum('lightRange'),
       water: isB ? readNum('waterBRange') : readNum('waterRange'),
@@ -157,73 +255,121 @@ function environmentalStress(config) {
   const thermal = deviation(env.temperature, sp.temp_opt, Math.max(8,(sp.temp_max-sp.temp_min)*0.55));
   const nutrition = deviation(env.nutrients, sp.nutrientes_opt, 40);
   const co2 = deviation(env.co2, sp.co2_opt, 320);
+  // Penalización extra fuera de rangos de tolerancia: exceso también puede dañar.
   const combined = water*.32 + thermal*.28 + light*.18 + nutrition*.14 + co2*.08;
   return {water:Math.round(water),thermal:Math.round(thermal),light:Math.round(light),nutrition:Math.round(nutrition),co2:Math.round(co2),combined:Math.round(combined)};
 }
 
-function growthFraction(day, config, stress) {
-  const t = Math.max(0, day);
-  const horizon = Math.max(1, config.days);
+function growthFraction(ageDay, config, stress, cycleDuration = config.species.dias_madurez) {
+  const duration = Math.max(30, cycleDuration || 90);
   const quality = clamp(1 - stress.combined/100*.78, .16, 1);
-  const r = Math.max(.005, config.rate * quality);
+  const u = clamp((Math.max(0, ageDay) * quality) / duration, 0, 1);
+  const rateFactor = clamp(config.rate / Math.max(.02,config.species.tasa_base || .1), .45, 1.8);
   let p;
   switch (config.model) {
     case 'lineal':
-      p = .015 + .965 * (t/horizon) * quality * clamp(config.rate/.1,.45,1.6);
+      p = .015 + .97*u;
       break;
-    case 'exponencial':
-      p = .015 * Math.exp(r * t * .52);
+    case 'exponencial': {
+      const k = 4.2*rateFactor;
+      p = .015 + .97*((Math.exp(k*u)-1)/(Math.exp(k)-1));
       break;
+    }
     case 'gompertz': {
-      const t0 = horizon * .34;
-      p = .985 * Math.exp(-Math.exp(-r*(t-t0)));
+      const k=7*rateFactor; const t0=.42;
+      const g0=Math.exp(-Math.exp(k*(t0-0)));
+      const g1=Math.exp(-Math.exp(k*(t0-1)));
+      const g=Math.exp(-Math.exp(k*(t0-u)));
+      p=.015+.97*clamp((g-g0)/Math.max(.001,g1-g0),0,1);
       break;
     }
     case 'logistico':
     default: {
-      const n0 = .015;
-      const k = .985;
-      p = k / (1 + ((k/n0)-1) * Math.exp(-r*t));
-      break;
+      const sig=(x)=>1/(1+Math.exp(-x));
+      const f0=sig(-5*rateFactor);const f1=sig(5*rateFactor);const f=sig(10*rateFactor*(u-.5));
+      p=.015+.97*clamp((f-f0)/Math.max(.001,f1-f0),0,1);
     }
   }
-  return clamp(p, .006, .985);
+  return clamp(p,.006,.985);
 }
 
-function evaluateSimulation(config) {
-  const stress = environmentalStress(config);
+function mortalityDamage(config, stress, env) {
+  const sp=config.species;
+  let damage=Math.max(0,stress.combined-52)*.09;
+  const excessiveWater=env.water>=97 || env.water>sp.agua_opt+30;
+  const drought=env.water<=3 || env.water<sp.agua_opt-48;
+  const excessNutrients=env.nutrients>=97 || env.nutrients>sp.nutrientes_opt+35;
+  const excessLight=env.light>=99;
+  const lightStarvation=env.light<=2;
+  const thermalShock=env.temperature>sp.temp_max+5 || env.temperature<sp.temp_min-6;
+  const co2Extreme=env.co2>=980;
+  if(excessiveWater) damage+=3.4;
+  if(drought) damage+=3.8;
+  if(excessNutrients) damage+=3.1;
+  if(excessLight) damage+=2.5;
+  if(lightStarvation) damage+=2.8;
+  if(thermalShock) damage+=4.2;
+  if(co2Extreme) damage+=1.4;
+  if(env.wind>=1.1) damage+=.8;
+  return {damage,causes:{excessiveWater,drought,excessNutrients,excessLight,lightStarvation,thermalShock,co2Extreme}};
+}
+
+function evaluateSimulation(config, events = []) {
   const sp = config.species;
-  const rate = config.rate;
   const capacity = config.K;
   const maxBiomass = Math.max(5, sp.biomasa_max_g * (capacity / Math.max(1,sp.capacidad_carga)));
   const maxHeight = clamp(sp.altura_max_cm/100, .45, 2.55);
   const maxLeaves = Math.max(10, Math.round(22 + maxHeight*14));
   const maxBranches = Math.max(3, Math.round(4 + maxHeight*2));
-  const measurements = [];
-  let previousBiomass = null;
-  for (let day=0; day<=config.days; day++) {
-    const p = growthFraction(day, config, stress);
-    const biomass = maxBiomass * Math.pow(p, 1.25) * clamp(1 - stress.nutrition/100*.17 - stress.water/100*.12, .55, 1.05);
-    const height = maxHeight * p;
-    const leaves = Math.round(maxLeaves * clamp((p-.14)/.82,0,1));
-    const branches = Math.round(maxBranches * clamp((p-.11)/.84,0,1));
-    const icr = previousBiomass === null ? 0 : ((biomass - previousBiomass) / Math.max(previousBiomass,.05))*100;
-    measurements.push({day,height_u:Number(height.toFixed(3)),biomass_g:Number(biomass.toFixed(3)),n_hojas:leaves,n_ramas:branches,icr:Number(clamp(icr,0,999).toFixed(3)),growth_pct:Number((p*100).toFixed(2)),stress_water:stress.water,stress_thermal:stress.thermal,stress_light:stress.light,stress_nutrition:stress.nutrition,stress_co2:stress.co2,stress_total:stress.combined});
-    previousBiomass = biomass;
+  const perennial=isPerennialSpecies(sp);
+  const reseed=config.reseedAnnuals !== false;
+  const measurements=[];
+  let previousBiomass=null; let health=100; let alive=true; let deathDay=null; let deathReason='';
+  let harvestDays=null;
+  for(let day=0; day<=config.days; day++) {
+    const cycle=cycleForDay(day,config);
+    if(cycle.reseeded){health=100;alive=true;deathDay=null;deathReason='';previousBiomass=null;}
+    const event=[...events].filter(e=>Number(e.day)<=day).sort((a,b)=>a.day-b.day).at(-1);
+    const climateBase=event?.environment?{...config,environment:{...config.environment,...event.environment}}:config;
+    const env=seasonalEnvironment(climateBase,day);
+    const dayConfig={...climateBase,environment:env};
+    const stress=environmentalStress(dayConfig);
+    const damage=mortalityDamage(dayConfig,stress,env);
+    health=clamp(health-damage.damage,0,100);
+    if(!perennial && !reseed && cycle.age>=sp.dias_madurez+90 && alive){health=0;deathReason='fin del ciclo vital anual';}
+    if(health<=0 && alive){alive=false;deathDay=day; if(!deathReason)deathReason=damage.causes.excessiveWater?'exceso de agua y riesgo de anoxia radicular':damage.causes.excessNutrients?'toxicidad por exceso de nutrientes':damage.causes.thermalShock?'choque térmico':damage.causes.drought?'deshidratación severa':damage.causes.excessLight?'exceso de radiación':'estrés ambiental acumulado';}
+    const shapeDuration=perennial ? Math.max(sp.dias_madurez*3,365) : sp.dias_madurez;
+    let baseP=growthFraction(cycle.age,dayConfig,stress,shapeDuration);
+    if(!perennial && !reseed && cycle.age>sp.dias_madurez){
+      const senescence=clamp((cycle.age-sp.dias_madurez)/90,0,1);
+      baseP*=lerp(1,.08,smooth(senescence));
+    }
+    if(perennial && env.season==='Invierno') baseP*=.94; // dormancia visual leve
+    const vitality=alive ? clamp(.42+health*.0058,.42,1) : .12;
+    const p=clamp(baseP*vitality,.006,.985);
+    let biomass=maxBiomass*Math.pow(p,1.25)*clamp(1-stress.nutrition/100*.17-stress.water/100*.12,.35,1.05);
+    if(!alive) biomass=previousBiomass===null?0:previousBiomass*.985;
+    const height=maxHeight*p;
+    const leaves=alive?Math.round(maxLeaves*clamp((p-.14)/.82,0,1)):0;
+    const branches=alive?Math.round(maxBranches*clamp((p-.11)/.84,0,1)):0;
+    const icr=previousBiomass===null?0:((biomass-previousBiomass)/Math.max(previousBiomass,.05))*100;
+    const m={day,height_u:Number(height.toFixed(3)),biomass_g:Number(biomass.toFixed(3)),n_hojas:leaves,n_ramas:branches,icr:Number(clamp(icr,-999,999).toFixed(3)),growth_pct:Number((p*100).toFixed(2)),stress_water:stress.water,stress_thermal:stress.thermal,stress_light:stress.light,stress_nutrition:stress.nutrition,stress_co2:stress.co2,stress_total:stress.combined,temporada:env.season,salud_pct:Math.round(health),viva:alive?1:0,alive,death_reason:deathReason,environment:{light:env.light,water:env.water,temperature:Number(env.temperature.toFixed(1)),nutrients:env.nutrients,co2:env.co2,wind:env.wind}};
+    measurements.push(m);
+    if(harvestDays===null && alive && p>=.92) harvestDays=day;
+    previousBiomass=biomass;
   }
-  // Find earliest modeled day over the 92%-of-capacity proxy used as the maturity threshold.
-  let harvestDays = null;
-  for(let day=0; day<=365; day++) {
-    if(growthFraction(day, config, stress) >= .92) { harvestDays = day; break; }
-  }
-  const final = measurements[measurements.length-1];
-  const recommendations = makeDecisions(config, stress, final, harvestDays);
-  return {
-    scenario:config.scenario, name:`${sp.nombre} · Escenario ${config.scenario}`, species_id:config.species_id,
-    species_name:sp.nombre, model:config.model, config, stress, measurements,
-    summary:{height_final:final.height_u,biomass_final:final.biomass_g,leaves_final:final.n_hojas,branches_final:final.n_ramas,icr_final:final.icr,stress_total:stress.combined,harvest_days:harvestDays},
-    decisions:recommendations
-  };
+  const final=measurements[measurements.length-1];
+  const stress=measurements.length?{
+    water:Math.round(measurements.reduce((a,m)=>a+m.stress_water,0)/measurements.length),
+    thermal:Math.round(measurements.reduce((a,m)=>a+m.stress_thermal,0)/measurements.length),
+    light:Math.round(measurements.reduce((a,m)=>a+m.stress_light,0)/measurements.length),
+    nutrition:Math.round(measurements.reduce((a,m)=>a+m.stress_nutrition,0)/measurements.length),
+    co2:Math.round(measurements.reduce((a,m)=>a+m.stress_co2,0)/measurements.length),
+    combined:Math.round(measurements.reduce((a,m)=>a+m.stress_total,0)/measurements.length)
+  }:environmentalStress(config);
+  const recommendations=makeDecisions(config,stress,final,harvestDays);
+  return {scenario:config.scenario,name:`${sp.nombre} · Escenario ${config.scenario}`,species_id:config.species_id,species_name:sp.nombre,model:config.model,config,stress,measurements,
+    summary:{height_final:final.height_u,biomass_final:final.biomass_g,leaves_final:final.n_hojas,branches_final:final.n_ramas,icr_final:final.icr,stress_total:final.stress_total,harvest_days:harvestDays,alive_final:final.alive,health_final:final.salud_pct,death_day:final.alive?null:measurements.find(m=>m.viva===0)?.day??null,death_reason:final.death_reason},decisions:recommendations};
 }
 
 function makeDecisions(config, stress, final, harvestDays) {
@@ -240,7 +386,9 @@ function makeDecisions(config, stress, final, harvestDays) {
   if(env.nutrients < sp.nutrientes_opt-22) add('warning','Nutrientes potencialmente limitantes',`El índice de nutrientes (${env.nutrients}%) está por debajo del óptimo simulado.`,'Revisar disponibilidad nutricional antes de modificar la fertilización.','nutrientes',env.nutrients,sp.nutrientes_opt-22);
   if(harvestDays !== null && harvestDays <= config.days) add('good','Madurez estimada dentro del horizonte',`El modelo alcanza el umbral de madurez alrededor del día ${harvestDays}.`,'Preparar una revisión de madurez; la cosecha real debe confirmarse con observaciones.','madurez',harvestDays,config.days);
   else add('warning','Madurez fuera del horizonte',`No se alcanza el umbral de madurez en ${config.days} días simulados.`,'Ampliar el horizonte o revisar las condiciones y los parámetros del modelo.','madurez',config.days,harvestDays);
-  if(stress.combined>=55) add('alert','Estrés compuesto elevado',`Índice compuesto de estrés: ${stress.combined}/100.`,'Priorizar la variable con mayor desviación antes de comparar rendimiento.','estres',stress.combined,55);
+  if(stress.combined>=55) add('alert','Estrés compuesto elevado',`Índice compuesto promedio: ${stress.combined}/100.`,'Priorizar la variable con mayor desviación antes de comparar rendimiento.','estres',stress.combined,55);
+  if(final && final.alive===false) add('alert','Muerte vegetal simulada',`La planta dejó de ser viable en el día ${final.day}. Causa estimada: ${final.death_reason||'estrés acumulado'}.`,'Revisar los excesos y déficits ambientales. El umbral de mortalidad es heurístico y educativo, no un diagnóstico biológico real.','salud',0,1);
+  else if(final && Number(final.salud_pct)<55) add('warning','Vitalidad reducida',`La salud simulada bajó a ${final.salud_pct}%.`,'Ajustar el factor que más se aleja del óptimo y comprobar si la salud se recupera.','salud',final.salud_pct,55);
   return items;
 }
 
@@ -317,11 +465,12 @@ function buildPlants() {
     function addPart(mesh,category,name,description,geometry,contribution,stressType='water'){
       mesh.castShadow=true;mesh.receiveShadow=true;
       mesh.userData.partInfo={...baseInfo,category,name,description,geometry,contribution,stressType,scenario:key,speciesName:sp.nombre};
+      mesh.userData.growthBaseColor=mesh.material?.color?.getStyle?.()||'#598b4f';
       organs.add(mesh);parts.push(mesh);selectables.push(mesh);sceneObjects.selectable.push(mesh);
       const finalPosition=mesh.position.clone();const finalScale=mesh.scale.clone();const finalQuaternion=mesh.quaternion.clone();
       let startPoint=null;let direction=null;let length=0;
       if(mesh.userData.segment){length=mesh.userData.segment.length;direction=mesh.userData.segment.direction.clone();startPoint=mesh.userData.segment.start.clone();}
-      mesh.userData.growthEntry={mesh,category,finalPosition,finalScale,finalQuaternion,startPoint,direction,length,progress:0,phase:Math.random()*5};
+      mesh.userData.growthEntry={mesh,category,finalPosition,finalScale,finalQuaternion,startPoint,direction,length,progress:0,phase:Math.random()*5,baseMatColor:mesh.material?.color?.getStyle?.()||'#598b4f',baseShaderColor:mesh.material?.uniforms?.uLeafColor?.value?.getStyle?.()||'#6ba56a',deadLook:false};
       return mesh;
     }
     const stemLength=visualHeight;
@@ -608,16 +757,28 @@ function showSelectedPart(mesh) {
   const info=mesh?.userData.partInfo;if(!info)return;
   $('partEmpty').hidden=true;$('partDetails').hidden=false;
   $('partName').textContent=info.name;$('partSpecies').textContent=info.speciesName;$('partScenario').textContent=`Escenario ${info.scenario}`;$('partGeometry').textContent=info.geometry;
-  const run=lastRuns?.[info.scenario];const progress=mesh.userData.growthEntry?.progress ?? 0;const stress=run?.stress || info.stress || {water:0,thermal:0,light:0,nutrition:0};const stressValue=info.stressType==='thermal'?stress.thermal:info.stressType==='light'?stress.light:info.stressType==='nutrition'?stress.nutrition:stress.water;
-  const contrib=Number(info.contribution||0);
+  const run=lastRuns?.[info.scenario];const progress=mesh.userData.growthEntry?.progress ?? 0;
+  const day=clamp(Math.floor(activeSimulationDay),0,(run?.measurements?.length||1)-1);const current=run?.measurements?.[day];
+  const stress=current?{water:current.stress_water,thermal:current.stress_thermal,light:current.stress_light,nutrition:current.stress_nutrition,co2:current.stress_co2,combined:current.stress_total}:(run?.stress||info.stress||{water:0,thermal:0,light:0,nutrition:0});
+  const stressKey=info.stressType==='thermal'?'thermal':info.stressType==='light'?'light':info.stressType==='nutrition'?'nutrition':info.stressType==='co2'?'co2':'water';
+  const stressValue=stress[stressKey]||0;const contrib=Number(info.contribution||0);const alive=current?Boolean(current.alive):true;const health=current?.salud_pct??100;
   $('partGrowth').textContent=`${Math.round(progress*100)}%`;$('partStress').textContent=`${stressValue}/100`;$('partContribution').textContent=`${contrib.toFixed(1)}%`;$('partGrowthFill').style.width=`${progress*100}%`;$('partDescription').textContent=info.description;
+  const category=String(info.category||'').toLowerCase();let insight;
+  if(!alive) insight=`La planta está marcada como muerta en el modelo. Causa simulada: ${current?.death_reason||'estrés ambiental acumulado'}. La contribución de esta estructura deja de aumentar.`;
+  else if(category==='leaf') insight=`Función: capturar radiación para fotosíntesis. Estrés lumínico ${stress.light}/100 e hídrico ${stress.water}/100; valores altos sugieren revisar sombra, agua y transpiración.`;
+  else if(category==='stem'||category==='branch') insight=`Función: sostén y transporte entre raíces y órganos. El estrés térmico ${stress.thermal}/100 puede afectar crecimiento y transporte; la ramificación también sostiene el rendimiento.`;
+  else if(category==='fruit') insight=`Función: formar o contener biomasa reproductiva. Estrés hídrico ${stress.water}/100 y nutricional ${stress.nutrition}/100 pueden limitar el llenado de frutos o semillas.`;
+  else if(category==='flower') insight=`Función: reproducción. Contrasta la etapa floral con la temporada (${current?.temporada||seasonInfo(activeSimulationDay).season}) y con el estrés térmico ${stress.thermal}/100.`;
+  else insight=`Esta estructura participa en el soporte o desarrollo del cultivo. Usa el crecimiento ${Math.round(progress*100)}%, el estrés asociado y la biomasa total como indicadores comparativos, no como mediciones reales.`;
+  $('partInsight').textContent=insight;
+  $('partHealth').textContent=`Estado: ${alive?'viva':'muerta'} · salud ${health}% · ${current?.temporada||seasonInfo(activeSimulationDay).season}`;
+  $('partHealth').classList.toggle('dead',!alive);
 }
-
 function updateGrowthInScene() {
   if(!sceneObjects||!lastRuns)return;
   for(const key of ['A','B']){
     const plant=sceneObjects.plants[key];const run=lastRuns[key];if(!plant||!run)continue;
-    const dayIndex=Math.min(Math.floor(activeSimulationDay),run.measurements.length-1);const m=run.measurements[dayIndex]||run.measurements[0];const p=clamp(Number(m?.growth_pct||0)/100,.006,.99);
+    const dayIndex=Math.min(Math.floor(activeSimulationDay),run.measurements.length-1);const m=run.measurements[dayIndex]||run.measurements[0];const p=clamp(Number(m?.growth_pct||0)/100,.006,.99);const alive=m?.alive!==false;
     for(const mesh of plant.parts){
       const e=mesh.userData.growthEntry;if(!e)continue;
       let local;
@@ -630,81 +791,166 @@ function updateGrowthInScene() {
       else if(e.category==='stem'){const len=plant.stemLength*local;mesh.scale.set(e.finalScale.x,Math.max(.0001,len),e.finalScale.z);mesh.position.set(0,len/2,0);}
       else {mesh.scale.set(Math.max(.0001,e.finalScale.x*local),Math.max(.0001,e.finalScale.y*local),Math.max(.0001,e.finalScale.z*local));mesh.position.lerpVectors(new THREE.Vector3(0,plant.stemLength*.22,0),e.finalPosition,local);}
       mesh.visible=local>.004;
+      if(e.deadLook!==!alive){
+        e.deadLook=!alive;
+        if(mesh.material?.uniforms?.uLeafColor){mesh.material.uniforms.uLeafColor.value.set(alive?(e.baseShaderColor||'#6ba56a'):'#88775a');}
+        else if(mesh.material?.color){mesh.material.color.set(alive?(e.baseMatColor||'#598b4f'):'#88775a');}
+      }
     }
+    if(plant.healthLabel) plant.healthLabel.textContent=alive?`${m.salud_pct}% salud`:'Muerta';
+    const badge=$(`timelineHealth${key}`);if(badge){badge.textContent=alive?`${m.salud_pct}% · viva`:`Muerta · día ${m.day}`;badge.classList.toggle('dead',!alive);}
   }
   if(selectedPartObject)showSelectedPart(selectedPartObject);
 }
-
 function animateThree() {
   if(!sceneObjects)return;
   requestAnimationFrame(animateThree);
   const now=performance.now();const delta=Math.min(.06,(now-sceneObjects.lastTick)/1000);sceneObjects.lastTick=now;
-  if(playbackActive&&lastRuns&&runStarted){activeSimulationDay+=delta*playbackSpeed;if(activeSimulationDay>=Math.max(lastRuns.A.config.days,lastRuns.B.config.days)){activeSimulationDay=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);playbackActive=false;$('runStatus').textContent='Horizonte completado';$('pauseButton').innerHTML='<span>▶</span> Reanudar reproducción';}}
+  if(playbackActive&&lastRuns&&runStarted){activeSimulationDay+=delta*playbackSpeed;if(activeSimulationDay>=Math.max(lastRuns.A.config.days,lastRuns.B.config.days)){activeSimulationDay=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);setPlaybackState(false,'Horizonte completado');}}
   const time=now/1000;
   for(const plant of Object.values(sceneObjects.plants)){
     if(!plant)continue;
-    const key=plant.key;const cfg=lastRuns?.[key]?.config || plant.config;const windStrength=clamp(Number(cfg.environment?.wind ?? .45),0,1.2);
-    plant.organs.rotation.z=Math.sin(time*.75+(key==='A'?0:1.1))*windStrength*.035;
+    const key=plant.key;const cfg=lastRuns?.[key]?.config || plant.config;const run=lastRuns?.[key];const day=Math.min(Math.floor(activeSimulationDay),(run?.measurements?.length||1)-1);const current=run?.measurements?.[day];const windStrength=clamp(Number(current?.environment?.wind ?? cfg.environment?.wind ?? .45),0,1.2);
+    plant.organs.rotation.z=Math.sin(time*.75+(key==='A'?0:1.1))*windStrength*.035+(current?.alive===false ? .12 : 0);
     plant.organs.rotation.x=Math.cos(time*.58+(key==='B'?0:.8))*windStrength*.014;
   }
-  sceneObjects.leafMaterials.forEach((mat,i)=>{mat.uniforms.uTime.value=time;mat.uniforms.uWindStrength.value=clamp(readNum('windRange')/100,0,1.2);});
+  sceneObjects.leafMaterials.forEach((mat,i)=>{mat.uniforms.uTime.value=time;const plantKey=i%2?'B':'A';const run=lastRuns?.[plantKey];const day=Math.min(Math.floor(activeSimulationDay),(run?.measurements?.length||1)-1);const wind=run?.measurements?.[day]?.environment?.wind??readNum('windRange')/100;mat.uniforms.uWindStrength.value=clamp(wind,0,1.2);});
   sceneObjects.controls.update();sceneObjects.renderer.render(sceneObjects.scene,sceneObjects.camera);
-  if(lastRuns){const days=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);const current=Math.min(Math.floor(activeSimulationDay),days);if(current!==animateThree.lastDay){animateThree.lastDay=current;updateGrowthInScene();updateKpis();updateGrowthChart();}}
+  if(lastRuns){const days=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);const current=Math.min(Math.floor(activeSimulationDay),days);if(current!==animateThree.lastDay){animateThree.lastDay=current;updateGrowthInScene();updateKpis();updateGrowthChart();updateStressChart();updateTimelineUI();}}
 }
 animateThree.lastDay=-1;
 
 function resizeScene() { if(!sceneObjects)return;const {container,camera,renderer}=sceneObjects;const w=container.clientWidth,h=container.clientHeight;if(!w||!h)return;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h); }
 
-async function executeComparison({silent=false}={}) {
+async function executeComparison({silent=false,preserveTime=false,keepEnvironmentEvents=false}={}) {
+  const oldDay=activeSimulationDay; const wasPlaying=playbackActive;
   const configA=gatherConfig('A');const configB=gatherConfig('B');
-  lastRuns={A:evaluateSimulation(configA),B:evaluateSimulation(configB)};activeSimulationDay=0;runStarted=true;playbackActive=true;playbackSpeed=readNum('playbackRange');
-  $('runStatus').textContent='Simulación en reproducción';$('pauseButton').innerHTML='<span>Ⅱ</span> Pausar reproducción';$('currentModelBadge').textContent=`A: ${modelLabels[configA.model]} · B: ${modelLabels[configB.model]}`;
-  $('sceneDayA').textContent=`Día 0 / ${configA.days}`;$('sceneDayB').textContent=`Día 0 / ${configB.days}`;
-  $('sceneProgressText').textContent='Crecimiento: 0%';
+  if(!keepEnvironmentEvents)environmentEvents={A:[],B:[]};
+  lastRuns={A:evaluateSimulation(configA,environmentEvents.A),B:evaluateSimulation(configB,environmentEvents.B)};
+  environmentPending=false; updateEnvironmentPendingUI();
+  activeSimulationDay=preserveTime?clamp(oldDay,0,Math.max(configA.days,configB.days)):0;
+  runStarted=true;playbackActive=preserveTime?wasPlaying:true;playbackSpeed=readNum('playbackRange');
+  $('runStatus').textContent=playbackActive?'Simulación en reproducción':'Reproducción pausada';$('pauseButton').innerHTML=playbackActive?'<span>Ⅱ</span> Pausar reproducción':'<span>▶</span> Reanudar reproducción';$('currentModelBadge').textContent=`A: ${modelLabels[configA.model]} · B: ${modelLabels[configB.model]}`;
+  $('timelineRange').max=String(Math.max(configA.days,configB.days));$('timelineRange').value=String(Math.floor(activeSimulationDay));$('timelineEndLabel').textContent=`Fin · ${formatHorizon(Math.max(configA.days,configB.days))}`;
+  $('sceneDayA').textContent=`Día ${Math.floor(activeSimulationDay)} / ${configA.days}`;$('sceneDayB').textContent=`Día ${Math.floor(activeSimulationDay)} / ${configB.days}`;
+  $('sceneProgressText').textContent=`Crecimiento: ${Math.round(lastRuns.A.measurements[Math.floor(activeSimulationDay)]?.growth_pct||0)}%`;
   renderDecisions();updateStressChart();
   if(sceneObjects)buildPlants();
-  updateGrowthInScene();updateKpis();updateGrowthChart();
+  updateGrowthInScene();updateKpis();updateGrowthChart();updateStressChart();updateTimelineUI();animateThree.lastDay=Math.floor(activeSimulationDay);
   if(!silent)notify('Se calcularon los escenarios A y B con el modelo seleccionado.');
   return lastRuns;
 }
 
 function updateKpis() {
   if(!lastRuns)return;const run=lastRuns.A;const day=clamp(Math.floor(activeSimulationDay),0,run.measurements.length-1);const m=run.measurements[day];const p=Number(m.growth_pct)||0;
-  $('kpiDay').innerHTML=`${day} <small>/ ${run.config.days}</small>`;$('kpiHeight').innerHTML=`${Number(m.height_u).toFixed(2)} <small>u</small>`;$('kpiBiomass').innerHTML=`${Number(m.biomass_g).toFixed(1)} <small>g</small>`;$('kpiIcr').innerHTML=`${Number(m.icr).toFixed(1)} <small>%/día</small>`;$('kpiLeaves').textContent=String(m.n_hojas);$('kpiBranches').textContent=String(m.n_ramas);$('kpiStress').innerHTML=`${run.stress.combined} <small>/100</small>`;$('kpiAction').textContent=(run.decisions.find(d=>d.severity==='alert')||run.decisions.find(d=>d.severity==='warning')||run.decisions[0])?.title||'Monitorear';
-  $('sceneDayA').textContent=`Día ${day} / ${run.config.days}`;$('sceneDayB').textContent=`Día ${Math.min(day,lastRuns.B.config.days)} / ${lastRuns.B.config.days}`;$('sceneProgressText').textContent=`Crecimiento A: ${Math.round(p)}%`;
+  $('kpiDay').innerHTML=`${day} <small>/ ${run.config.days} · ${seasonInfo(day).year} año(s)</small>`;$('kpiHeight').innerHTML=`${Number(m.height_u).toFixed(2)} <small>u</small>`;$('kpiBiomass').innerHTML=`${Number(m.biomass_g).toFixed(1)} <small>g</small>`;$('kpiIcr').innerHTML=`${Number(m.icr).toFixed(1)} <small>%/día</small>`;$('kpiLeaves').textContent=String(m.n_hojas);$('kpiBranches').textContent=String(m.n_ramas);$('kpiStress').innerHTML=`${m.stress_total} <small>/100</small>`;
+  const action=!m.alive?'Muerte vegetal · revisar ambiente':(run.decisions.find(d=>d.severity==='alert')||run.decisions.find(d=>d.severity==='warning')||run.decisions[0])?.title||'Monitorear';
+  $('kpiAction').textContent=action;
+  $('sceneDayA').textContent=`Día ${day} / ${run.config.days} · ${m.temporada}`;$('sceneDayB').textContent=`Día ${Math.min(day,lastRuns.B.config.days)} / ${lastRuns.B.config.days} · ${lastRuns.B.measurements[Math.min(day,lastRuns.B.measurements.length-1)]?.temporada||''}`;$('sceneProgressText').textContent=`Crecimiento A: ${Math.round(p)}%${m.alive?'':' · muerta'}`;
 }
 
 function updateGrowthChart() {
   if(!charts.growth||!lastRuns)return;const day=Math.floor(activeSimulationDay);const maxDay=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);const labels=[];const dataA=[];const dataB=[];
-  for(let d=0;d<=Math.min(day,maxDay);d++){labels.push(d);const a=lastRuns.A.measurements[Math.min(d,lastRuns.A.measurements.length-1)];const b=lastRuns.B.measurements[Math.min(d,lastRuns.B.measurements.length-1)];dataA.push(a.biomass_g);dataB.push(b.biomass_g);}
+  // Limita puntos en horizontes de varios años para que Chart.js siga fluido.
+  const stride=Math.max(1,Math.ceil((day+1)/500));
+  for(let d=0;d<=Math.min(day,maxDay);d+=stride){labels.push(d);const a=lastRuns.A.measurements[Math.min(d,lastRuns.A.measurements.length-1)];const b=lastRuns.B.measurements[Math.min(d,lastRuns.B.measurements.length-1)];dataA.push(a.biomass_g);dataB.push(b.biomass_g);}
+  if(labels.at(-1)!==day){labels.push(day);dataA.push(lastRuns.A.measurements[Math.min(day,lastRuns.A.measurements.length-1)].biomass_g);dataB.push(lastRuns.B.measurements[Math.min(day,lastRuns.B.measurements.length-1)].biomass_g);}
   charts.growth.data.labels=labels.length?labels:[0];charts.growth.data.datasets[0].data=dataA.length?dataA:[0];charts.growth.data.datasets[1].data=dataB.length?dataB:[0];charts.growth.update('none');
 }
 
 function updateStressChart() {
-  if(!charts.stress||!lastRuns)return;const a=lastRuns.A.stress,b=lastRuns.B.stress;charts.stress.data.datasets[0].data=[a.water,a.thermal,a.light,a.nutrition,a.co2];charts.stress.data.datasets[1].data=[b.water,b.thermal,b.light,b.nutrition,b.co2];charts.stress.update();
+  if(!charts.stress||!lastRuns)return;const day=Math.floor(activeSimulationDay);const ma=lastRuns.A.measurements[Math.min(day,lastRuns.A.measurements.length-1)];const mb=lastRuns.B.measurements[Math.min(day,lastRuns.B.measurements.length-1)];
+  charts.stress.data.datasets[0].data=[ma.stress_water,ma.stress_thermal,ma.stress_light,ma.stress_nutrition,ma.stress_co2];charts.stress.data.datasets[1].data=[mb.stress_water,mb.stress_thermal,mb.stress_light,mb.stress_nutrition,mb.stress_co2];charts.stress.update('none');
 }
 
+function updateTimelineUI() {
+  if(!lastRuns)return;const day=clamp(Math.floor(activeSimulationDay),0,Math.max(lastRuns.A.config.days,lastRuns.B.config.days));const season=seasonInfo(day);const max=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);
+  $('timelineRange').max=String(max);$('timelineRange').value=String(day);$('timelineDate').textContent=`Año ${season.year} · Día ${day} / ${max}`;
+  const badge=$('timelineSeason');badge.textContent=`${season.icon} ${season.season}`;badge.className=`season-badge ${season.css}`;
+  $('timelineCurrentLabel').textContent=`Día ${day} · Año ${season.year}`;$('timelineEndLabel').textContent=`Fin · ${formatHorizon(max)}`;
+  const current=lastRuns.A.measurements[Math.min(day,lastRuns.A.measurements.length-1)];
+  if(current){$('timelineEvent').textContent=!current.alive?`Muerte estimada: ${current.death_reason||'estrés acumulado'}`:current.viva===1&&current.salud_pct<65?`Estrés acumulado · salud ${current.salud_pct}%`:`${current.temporada} · salud ${current.salud_pct}%`;}
+  const toggle=$('timelinePlayButton');toggle.innerHTML=playbackActive?'<span>Ⅱ</span> Pausar':'<span>▶</span> Reproducir';
+}
 function renderDecisions() {
   if(!lastRuns)return;const a=lastRuns.A;const b=lastRuns.B;const winner=a.summary.biomass_final>=b.summary.biomass_final?'A':'B';const diff=Math.abs(a.summary.biomass_final-b.summary.biomass_final)/Math.max(a.summary.biomass_final,b.summary.biomass_final,.1)*100;
   let items=[...a.decisions.slice(0,4)];items.push({severity:'good',title:`Comparación A/B · ventaja de ${winner}`,message:`La biomasa simulada final difiere ${diff.toFixed(1)}% entre escenarios (${a.summary.biomass_final.toFixed(1)} g frente a ${b.summary.biomass_final.toFixed(1)} g).`,recommendation:'Interpreta el resultado como una hipótesis de simulación y valida con datos experimentales.'});
   $('decisionList').innerHTML=items.map(item=>`<div class="decision-item ${item.severity==='alert'?'alert':item.severity==='warning'?'warning':''}"><span class="decision-icon">${item.severity==='alert'?'!':item.severity==='warning'?'△':'✓'}</span><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.message)} ${item.recommendation?escapeHtml(item.recommendation):''}</p></div></div>`).join('');
 }
 
+const environmentControlIds = new Set(['lightRange','waterRange','temperatureRange','nutrientRange','co2Range','windRange','waterBRange','temperatureBRange']);
+function currentEnvironment(which) {
+  const isB=which==='B';
+  return {light:readNum('lightRange'),water:isB?readNum('waterBRange'):readNum('waterRange'),temperature:isB?readNum('temperatureBRange'):readNum('temperatureRange'),nutrients:readNum('nutrientRange'),co2:readNum('co2Range'),wind:readNum('windRange')/100};
+}
+function updateEnvironmentPendingUI() {
+  const button=$('timelineApplyEnvironmentButton'); const note=$('environmentPendingNote');
+  if(!button||!note)return;
+  button.textContent=environmentPending?`Aplicar ambiente desde el día ${Math.floor(activeSimulationDay)} · guardar cambio`:'Aplicar ambiente desde el día actual';
+  button.classList.toggle('pending',environmentPending);
+  note.textContent=environmentPending?'Hay ajustes ambientales sin aplicar. El cambio afectará al modelo desde el día actual, no a los días anteriores.':'Los cambios de sliders se aplicarán al pulsar este botón.';
+}
+function markEnvironmentPending() {
+  environmentPending=true;
+  if(playbackActive)setPlaybackState(false,'Reproducción pausada para editar el ambiente');
+  updateEnvironmentPendingUI();
+  $('runStatus').textContent=`Cambios ambientales pendientes · día ${Math.floor(activeSimulationDay)}`;
+}
+function applyEnvironmentAtCurrentDay() {
+  if(!lastRuns){notify('Ejecuta una simulación antes de aplicar un cambio ambiental.','warning');return;}
+  const day=Math.floor(activeSimulationDay);
+  for(const key of ['A','B']){
+    const snapshot=currentEnvironment(key);
+    environmentEvents[key]=environmentEvents[key].filter(event=>Number(event.day)<day);
+    environmentEvents[key].push({day,environment:snapshot});
+    environmentEvents[key].sort((a,b)=>a.day-b.day);
+  }
+  // Conserva la trayectoria previa: recalcula a partir de la serie base más el evento ambiental fechado.
+  const configA=lastRuns.A.config; const configB=lastRuns.B.config;
+  lastRuns={A:evaluateSimulation(configA,environmentEvents.A),B:evaluateSimulation(configB,environmentEvents.B)};
+  environmentPending=false;updateEnvironmentPendingUI();setPlaybackState(false,`Ambiente actualizado desde el día ${day}`);
+  if(sceneObjects)buildPlants();
+  updateGrowthInScene();updateKpis();updateGrowthChart();updateStressChart();renderDecisions();updateTimelineUI();animateThree.lastDay=day-1;
+  notify(`Condiciones ambientales aplicadas desde el día ${day}. Los días anteriores mantienen el ambiente previo.`);
+}
+
+function setPlaybackState(playing, statusText=null) {
+  playbackActive=Boolean(playing);
+  $('pauseButton').innerHTML=playbackActive?'<span>Ⅱ</span> Pausar reproducción':'<span>▶</span> Reanudar reproducción';
+  $('runStatus').textContent=statusText||(playbackActive?'Simulación en reproducción':'Reproducción pausada');
+  updateTimelineUI();
+}
+function seekSimulation(day,{pause=false}={}) {
+  if(!lastRuns)return;
+  const max=Math.max(lastRuns.A.config.days,lastRuns.B.config.days);
+  activeSimulationDay=clamp(Number(day)||0,0,max);
+  if(pause)setPlaybackState(false,'Reproducción pausada · posición manual');
+  animateThree.lastDay=Math.floor(activeSimulationDay)-1;
+  updateGrowthInScene();updateKpis();updateGrowthChart();updateStressChart();updateTimelineUI();
+}
 function bindControls() {
-  const outputMap={lightRange:['lightValue',v=>`${v}%`],waterRange:['waterValue',v=>`${v}%`],temperatureRange:['temperatureValue',v=>`${v} °C`],nutrientRange:['nutrientValue',v=>`${v}%`],co2Range:['co2Value',v=>`${v} ppm`],rateRange:['rateValue',v=>Number(v).toFixed(2)],capacityRange:['capacityValue',v=>String(v)],daysRange:['daysValue',v=>`${v} días`],playbackRange:['playbackValue',v=>`${v} días/s`],windRange:['windValue',v=>`${v}%`],waterBRange:['waterBValue',v=>`${v}%`],temperatureBRange:['temperatureBValue',v=>`${v} °C`]};
-  for(const [id,[out,format]] of Object.entries(outputMap))$(id).addEventListener('input',()=>{$(out).textContent=format($(id).value);if(id==='playbackRange')playbackSpeed=readNum(id);});
-  $('speciesSelect').addEventListener('change',()=>{updateSpeciesNote();scheduleRecalculate();});
+  const outputMap={lightRange:['lightValue',v=>`${v}%`],waterRange:['waterValue',v=>`${v}%`],temperatureRange:['temperatureValue',v=>`${v} °C`],nutrientRange:['nutrientValue',v=>`${v}%`],co2Range:['co2Value',v=>`${v} ppm`],rateRange:['rateValue',v=>Number(v).toFixed(2)],capacityRange:['capacityValue',v=>String(v)],daysRange:['daysValue',v=>formatHorizon(Number(v))],playbackRange:['playbackValue',v=>`${v} días/s`],windRange:['windValue',v=>`${v}%`],waterBRange:['waterBValue',v=>`${v}%`],temperatureBRange:['temperatureBValue',v=>`${v} °C`]};
+  for(const [id,[out,format]] of Object.entries(outputMap))$(id).addEventListener('input',()=>{$(out).textContent=format($(id).value);if(id==='playbackRange')playbackSpeed=readNum(id);updateOptimumHints();if(environmentControlIds.has(id))markEnvironmentPending();});
+  $('speciesSelect').addEventListener('change',()=>{setSpeciesEnvironmentDefaults();updateSpeciesNote();scheduleRecalculate();});
   for(const id of ['modelSelect','modelBSelect'])$(id).addEventListener('change',()=>{updateSpeciesNote();scheduleRecalculate();});
-  for(const id of Object.keys(outputMap))$(id).addEventListener('change',()=>{if(id!=='playbackRange')scheduleRecalculate();});
+  for(const id of Object.keys(outputMap))$(id).addEventListener('change',()=>{if(id!=='playbackRange'&&!environmentControlIds.has(id))scheduleRecalculate(true);});
+  $('reseedAnnuals').addEventListener('change',()=>scheduleRecalculate(true));
   $('runButton').addEventListener('click',()=>executeComparison());
-  $('pauseButton').addEventListener('click',()=>{playbackActive=!playbackActive;$('pauseButton').innerHTML=playbackActive?'<span>Ⅱ</span> Pausar reproducción':'<span>▶</span> Reanudar reproducción';$('runStatus').textContent=playbackActive?'Simulación en reproducción':'Reproducción pausada';});
-  $('resetButton').addEventListener('click',()=>{activeSimulationDay=0;playbackActive=true;runStarted=true;$('pauseButton').innerHTML='<span>Ⅱ</span> Pausar reproducción';$('runStatus').textContent='Crecimiento reiniciado';updateGrowthInScene();updateKpis();updateGrowthChart();notify('El reloj de la simulación regresó al día cero.');});
+  const togglePlayback=()=>setPlaybackState(!playbackActive);
+  $('pauseButton').addEventListener('click',togglePlayback);$('timelinePlayButton').addEventListener('click',togglePlayback);
+  $('resetButton').addEventListener('click',()=>{seekSimulation(0);setPlaybackState(true,'Crecimiento reiniciado');notify('El reloj regresó al día cero.');});
+  $('timelineRange').addEventListener('input',e=>seekSimulation(Number(e.target.value),{pause:true}));
+  $('timelineStartButton').addEventListener('click',()=>seekSimulation(0,{pause:true}));
+  $('timelineBackButton').addEventListener('click',()=>seekSimulation(activeSimulationDay-30,{pause:true}));
+  $('timelineForwardButton').addEventListener('click',()=>seekSimulation(activeSimulationDay+30,{pause:true}));
+  $('timelineEndButton').addEventListener('click',()=>seekSimulation(Math.max(lastRuns?.A.config.days||0,lastRuns?.B.config.days||0),{pause:true}));
+  $('timelineApplyEnvironmentButton').addEventListener('click',applyEnvironmentAtCurrentDay);
   $('saveButton').addEventListener('click',saveCurrentRuns);$('csvButton').addEventListener('click',exportCsv);$('pdfButton').addEventListener('click',()=>window.print());
   $('resetCameraButton')?.addEventListener('click',()=>sceneObjects?.resetCamera());
   for(const button of document.querySelectorAll('.nav-item'))button.addEventListener('click',()=>switchView(button.dataset.view));
   $('refreshHistoryButton').addEventListener('click',refreshHistory);$('refreshReportsButton').addEventListener('click',refreshReports);
 }
-let recalcTimer=null;function scheduleRecalculate(){clearTimeout(recalcTimer);recalcTimer=setTimeout(()=>executeComparison({silent:true}),280);}
+let recalcTimer=null;function scheduleRecalculate(preserveTime=true){clearTimeout(recalcTimer);recalcTimer=setTimeout(()=>executeComparison({silent:true,preserveTime}),280);}
 
 function switchView(name) {
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===name));document.querySelectorAll('.view-panel').forEach(p=>p.classList.toggle('active',p.id===`view-${name}`));
@@ -716,7 +962,7 @@ function persistLocal(run, id) {
   const list=localHistory();const summary=run.summary;const item={id:id||`local-${Date.now()}-${run.scenario}`,local_id:id||`local-${Date.now()}-${run.scenario}`,nombre:run.name,notas:run.notes||'',especie_nombre:run.species_name,especie_id:run.species_id,modelo:run.model,escenario:run.scenario,biomasa_final:summary.biomass_final,altura_final:summary.height_final,estres_total:summary.stress_total,dias_simulados:run.config.days,dias_cosecha_estimados:summary.harvest_days,created_at:new Date().toISOString(),config:serializeConfig(run.config),summary,measurements:run.measurements,stress:run.stress,decisions:run.decisions};
   list.unshift(item);localStorage.setItem(memoryKey,JSON.stringify(list.slice(0,20)));return item;
 }
-function serializeConfig(config){return {species_id:config.species_id,model:config.model,days:config.days,rate:config.rate,K:config.K,environment:config.environment};}
+function serializeConfig(config){return {species_id:config.species_id,model:config.model,days:config.days,rate:config.rate,K:config.K,reseedAnnuals:config.reseedAnnuals,environment:config.environment,environment_events:environmentEvents[config.scenario]||[]};}
 
 async function saveCurrentRuns() {
   if(!lastRuns){notify('Primero ejecuta una simulación.','warning');return;}
@@ -727,7 +973,7 @@ async function saveCurrentRuns() {
   let saved=0;let fellBack=false;
   try {
     for(const key of ['A','B']){
-      const run=lastRuns[key];const payload={name:`${baseName} · Escenario ${key}`,notes:`${userNotes}${userNotes?'\n':''}Escenario ${key}; modelo ${modelLabels[run.model]}; horizonte ${run.config.days} días.`,species_id:run.species_id,model:run.model,scenario_label:key,config:serializeConfig(run.config),summary:run.summary,measurements:run.measurements,decisions:run.decisions};
+      const run=lastRuns[key];const payload={name:`${baseName} · Escenario ${key}`,notes:`${userNotes}${userNotes?'\n':''}Escenario ${key}; modelo ${modelLabels[run.model]}; horizonte ${run.config.days} días; salud final ${run.summary.health_final}%; muerte estimada ${run.summary.death_day??'no'}. Modelo estacional educativo con resiembra=${$('reseedAnnuals').checked}.`,species_id:run.species_id,model:run.model,scenario_label:key,config:serializeConfig(run.config),summary:run.summary,measurements:run.measurements,decisions:run.decisions};
       if(apiOnline){try{await requestApi('/simulaciones',{method:'POST',body:JSON.stringify(payload)});saved++;}catch(error){fellBack=true;persistLocal({...run,name:payload.name,notes:payload.notes});console.warn(error);}}
       else {persistLocal({...run,name:payload.name,notes:payload.notes});saved++;fellBack=true;}
     }
@@ -757,9 +1003,9 @@ async function loadHistoryRow(row) {
     if(apiOnline && row.id && !String(row.id).startsWith('local-'))detail=await requestApi(`/simulaciones/${Number(row.id)}`);
     const m=detail.mediciones||detail.measurements||row.measurements||[];
     if(!m.length){notify('El registro no contiene mediciones visibles para reproducir.','warning');return;}
-    const normalized=m.map(x=>({day:Number(x.dia??x.day??0),height_u:Number(x.altura_u??x.height_u??x.altura??0),biomass_g:Number(x.biomasa_g??x.biomass_g??0),n_hojas:Number(x.n_hojas??x.leaves??0),n_ramas:Number(x.n_ramas??x.branches??0),icr:Number(x.icr??0),growth_pct:Number(x.growth_pct??x.progreso_pct??x.growth_percent??0),stress_water:Number(x.estres_hidrico??x.stress_water??0),stress_thermal:Number(x.estres_termico??x.stress_thermal??0),stress_light:Number(x.estres_luminico??x.stress_light??0),stress_nutrition:Number(x.estres_nutricional??x.stress_nutrition??0),stress_co2:Number(x.estres_co2??x.stress_co2??0),stress_total:Number(x.estres_total??x.stress_total??0)}));
-    const species=speciesCatalog.find(s=>Number(s.id)===Number(detail.especie_id??detail.species_id))||selectedSpecies();const conf={scenario:'A',species,species_id:Number(species.id),model:detail.modelo||detail.model||'logistico',days:Number(detail.dias_simulados||normalized.length-1),rate:Number(detail.config?.rate||detail.parametros?.rate||.1),K:Number(detail.config?.K||detail.parametros?.K||1000),environment:detail.config?.environment||{light:70,water:70,temperature:24,nutrients:65,co2:430}};const stress=detail.stress||{water:Number(detail.estres_hidrico||0),thermal:Number(detail.estres_termico||0),light:Number(detail.estres_luminico||0),nutrition:Number(detail.estres_nutricional||0),co2:0,combined:Number(detail.estres_total||0)};
-    const run={scenario:'A',name:detail.nombre||detail.name,species_id:species.id,species_name:species.nombre,model:conf.model,config:conf,stress,measurements:normalized,summary:{biomass_final:Number(detail.biomasa_final||0),height_final:Number(detail.altura_final||0),leaves_final:Number(detail.hojas_finales||0),branches_final:Number(detail.ramas_finales||0),icr_final:Number(detail.icr_final||0),stress_total:Number(detail.estres_total||0),harvest_days:detail.dias_cosecha_estimados??null},decisions:detail.decisiones||[]};
+    const normalized=m.map(x=>({day:Number(x.dia??x.day??0),height_u:Number(x.altura_u??x.height_u??x.altura??0),biomass_g:Number(x.biomasa_g??x.biomass_g??0),n_hojas:Number(x.n_hojas??x.leaves??0),n_ramas:Number(x.n_ramas??x.branches??0),icr:Number(x.icr??0),growth_pct:Number(x.growth_pct??x.progreso_pct??x.growth_percent??0),stress_water:Number(x.estres_hidrico??x.stress_water??0),stress_thermal:Number(x.estres_termico??x.stress_thermal??0),stress_light:Number(x.estres_luminico??x.stress_light??0),stress_nutrition:Number(x.estres_nutricional??x.stress_nutrition??0),stress_co2:Number(x.estres_co2??x.stress_co2??0),stress_total:Number(x.estres_total??x.stress_total??0),temporada:x.temporada||seasonInfo(Number(x.dia??x.day??0)).season,salud_pct:Number(x.salud_pct??100),viva:Number(x.viva??1),alive:Boolean(Number(x.viva??1)),death_reason:x.death_reason||''}));
+    const species=speciesCatalog.find(s=>Number(s.id)===Number(detail.especie_id??detail.species_id))||selectedSpecies();const savedConfig=detail.config||detail.parametros||{};const conf={scenario:'A',species,species_id:Number(species.id),model:detail.modelo||detail.model||savedConfig.model||'logistico',days:Number(detail.dias_simulados||savedConfig.days||normalized.length-1),rate:Number(savedConfig.rate||.1),K:Number(savedConfig.K||1000),reseedAnnuals:savedConfig.reseedAnnuals!==false,environment:savedConfig.environment||{light:70,water:70,temperature:24,nutrients:65,co2:430,wind:.35}};environmentEvents={A:Array.isArray(savedConfig.environment_events)?savedConfig.environment_events:[],B:Array.isArray(savedConfig.environment_events)?savedConfig.environment_events:[]};const stress=detail.stress||{water:Number(detail.estres_hidrico||0),thermal:Number(detail.estres_termico||0),light:Number(detail.estres_luminico||0),nutrition:Number(detail.estres_nutricional||0),co2:0,combined:Number(detail.estres_total||0)};
+    const run={scenario:'A',name:detail.nombre||detail.name,species_id:species.id,species_name:species.nombre,model:conf.model,config:conf,stress,measurements:normalized,summary:{biomass_final:Number(detail.biomasa_final||0),height_final:Number(detail.altura_final||0),leaves_final:Number(detail.hojas_finales||0),branches_final:Number(detail.ramas_finales||0),icr_final:Number(detail.icr_final||0),stress_total:Number(detail.estres_total||0),harvest_days:detail.dias_cosecha_estimados??null,health_final:Number(normalized.at(-1)?.salud_pct??100),alive_final:Boolean(Number(normalized.at(-1)?.viva??1)),death_day:normalized.find(x=>!x.alive)?.day??null,death_reason:normalized.find(x=>!x.alive)?.death_reason||''},decisions:detail.decisiones||[]};
     const confB={...conf,scenario:'B',model:conf.model};const runB={...run,scenario:'B',name:`${run.name} · réplica`,config:confB,measurements:normalized};lastRuns={A:run,B:runB};activeSimulationDay=0;playbackActive=true;runStarted=true;buildPlants();updateStressChart();renderDecisions();updateGrowthInScene();updateKpis();updateGrowthChart();switchView('dashboard');notify(`Cargada la simulación «${detail.nombre||detail.name||'sin nombre'}».`);
   }catch(error){notify(`No se pudo abrir el registro: ${error.message}`,'error');}
 }
@@ -784,8 +1030,8 @@ function renderReports(report) {
 
 function exportCsv() {
   if(!lastRuns){notify('Primero ejecuta una simulación.','warning');return;}
-  const rows=[['escenario','especie','modelo','dia','altura_u','biomasa_g','hojas','ramas','icr_pct_dia','estres_hidrico','estres_termico','estres_luminico','estres_nutricional','estres_co2','estres_total']];
-  for(const key of ['A','B'])for(const m of lastRuns[key].measurements)rows.push([key,lastRuns[key].species_name,lastRuns[key].model,m.day,m.height_u,m.biomass_g,m.n_hojas,m.n_ramas,m.icr,m.stress_water,m.stress_thermal,m.stress_light,m.stress_nutrition,m.stress_co2,m.stress_total]);
+  const rows=[['escenario','especie','modelo','dia','temporada','altura_u','biomasa_g','hojas','ramas','icr_pct_dia','salud_pct','viva','estres_hidrico','estres_termico','estres_luminico','estres_nutricional','estres_co2','estres_total','causa_muerte']];
+  for(const key of ['A','B'])for(const m of lastRuns[key].measurements)rows.push([key,lastRuns[key].species_name,lastRuns[key].model,m.day,m.temporada,m.height_u,m.biomass_g,m.n_hojas,m.n_ramas,m.icr,m.salud_pct,m.viva,m.stress_water,m.stress_thermal,m.stress_light,m.stress_nutrition,m.stress_co2,m.stress_total,m.death_reason]);
   const csv='\ufeff'+rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\r\n');downloadBlob(csv,`phytolab-escenarios-${new Date().toISOString().slice(0,10)}.csv`,'text/csv;charset=utf-8;');notify('CSV exportado con las mediciones de A y B.');
 }
 function downloadBlob(content,filename,type){const blob=new Blob([content],{type});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.append(a);a.click();a.remove();URL.revokeObjectURL(url);}
